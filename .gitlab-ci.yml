@@ -1,0 +1,105 @@
+workflow:
+  name: Solar System NodeJS Pipeline
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'main' || $CI_COMMIT_BRANCH =~ /^feature/
+      when: always
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^feature/ && $CI_PIPELINE_SOURCE == 'merge_request_event'
+      when: always
+
+# variables:                                        # we comment that because we put variables in the testing job this variables uses for testing environment only
+# MONGO_URI: 'mongodb+srv://supercluster.d83jj.mongodb.net/superData'
+# MONGO_USERNAME: superuser
+# MONGO_PASSWORD: $M_DB_PASSWORD
+
+stages:
+  - test
+  - containerization
+
+unit_testing:
+  stage: test
+  image: node:17-alpine3.14
+  services:
+    - name: siddharth67/mongo-db:non-prod # we use a sevices to create a container for database to test on it instead of using a real database for testing to save resources
+      alias: mongo
+      pull_policy: [always]
+  variables:
+    MONGO_URI: "mongodb://mongo:27017/superData" # we use here the service alias:port-num instead of service name to aviod the problems which happin when using service name
+    MONGO_USERNAME: non-prod-user
+    MONGO_PASSWORD: non-prod-password
+  before_script:
+    - npm install
+  script:
+    - npm test
+  cache:
+    policy: pull-push
+    key:
+      files:
+        - package-lock.json
+      prefix: kk-lab-node-modules
+    paths:
+      - node_modules
+  artifacts:
+    name: Mocha-Test-Result
+    when: on_success
+    paths:
+      - test-results.xml
+    expire_in: 3 days
+
+code_coverage:
+  stage: test
+  image: node:17-alpine3.14
+  services: # we do the same thing here for testing purpose
+    - name: siddharth67/mongo-db:non-prod
+      alias: mongo
+      pull_policy: [always]
+  variables:
+    MONGO_URI: "mongodb://mongo:27017/superData"
+    MONGO_USERNAME: non-prod-user
+    MONGO_PASSWORD: non-prod-password
+  before_script:
+    - npm install
+  cache:
+    policy: pull
+    key:
+      files:
+        - package-lock.json
+      prefix: kk-lab-node-modules
+    paths:
+      - node_modules
+  script: |
+    npm run coverage
+  artifacts:
+    name: Lab3-Code-Coverage-Result
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+  allow_failure: true
+
+docker_build:
+  stage: containerization
+  image: docker:24.0.5
+  dependencies: []
+  services:
+    - docker:24.0.5-dind # we use service of docker in docker image to allow the docker image to build an image
+  script:
+    - docker build -t solar-system:$CI_PIPELINE_ID . # we build the image here from a dockerfile in the repo or the working dir if we run locally
+    - docker images solar-system:$CI_PIPELINE_ID # we list the images to ensure that the image successefly created
+    - mkdir image # we make a dir to put the image on then upload it as an artifact to use this image in the next jobs in our pipelines if we need
+    - docker save solar-system:$CI_PIPELINE_ID > image/solar-system-image-$CI_PIPELINE_ID.tar # this command extract the image we created and save it as a tar file and we will use load command to get that image again
+  artifacts:
+    paths:
+      - image # we use artifact to upload the dir which we create and saved the image on it
+
+publish_gitlab_container_registry:
+  stage: containerization
+  needs:
+    - docker_build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  script:
+    - docker load -i image/solar-system-image-$CI_PIPELINE_ID.tar # this command is the reverse of save which we use in the previos step and we use it to load the image from the artifact to use it here
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY # we login to gitlab here to use it as a container registery to push our image here instead of docker hup
+    - docker tag solar-system:$CI_PIPELINE_ID $CI_REGISTRY_IMAGE/solar-system:$CI_PIPELINE_ID #we tag the image with the format which gitlab want to push the image on it , u can find it in the documentation
+    - docker push $CI_REGISTRY_IMAGE/solar-system:$CI_PIPELINE_ID # finally push the image to gitlab
